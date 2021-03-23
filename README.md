@@ -53,9 +53,15 @@ Inputs
 formula The DQDIMACS file of interest
 model   The generated certificate for formula
 Options
-  --check-def   Check if the certificate actually gives a model for the DQBF. Note: If this option is set and the script returns false then this does not mean that the result of pedant was false. Instead it only means that the certificate is not a model.
-  --check-cons  Additional sanity check that verifies if for each assignment to the universal variables there is an assignment to the existential variables such that the combined assignment satisfies the certificate.
-  --std-dep Use the "standard" dependencies, instead of the extended dependencies for the check.
+  --check-def   Check if the certificate actually gives a model for the DQBF. 
+    Note: If this option is set and the script returns false then this 
+    does not mean that the result of pedant was false. 
+    Instead it only means that the certificate is not a model.
+  --check-cons  Additional sanity check that verifies if for each 
+    assignment to the universal variables there is an assignment to the 
+    existential variables such that the combined assignment satisfies the certificate.
+  --std-dep Use the "standard" dependencies, instead of the 
+    extended dependencies for the check.
 
 Return 
   0 if the certificate could be validated
@@ -73,9 +79,10 @@ formula The DQDIMACS file of interest
 model   The generated certificate for formula
 
 Return
-  0  if pedant returned true (10) but the certificate could not be validated or if pedant returns unknown
-  10 if pedant returned true (10) but the certificate could be validated.
-  20 if pedant returned false (2)
+  0   if pedant returned true (10) but the certificate could not be validated 
+      or if pedant returns unknown
+  10  if pedant returned true (10) but the certificate could be validated.
+  20  if pedant returned false (2)
 
 ```
 
