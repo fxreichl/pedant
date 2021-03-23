@@ -1,0 +1,29 @@
+#!/bin/bash 
+# The purpose of this script is to certify SAT runs of pedant
+
+MATRIX_FILE=$1
+MODEL_FILE=$2
+
+./pedant $MATRIX_FILE $MODEL_FILE
+Result=$?
+
+if [ $Result == '10' ]
+then
+    python ./certifyModel.py "$MATRIX_FILE" "$MODEL_FILE"
+    isModelOk=$?
+    if [ $isModelOk == '0' ]
+    then
+#        echo "Model validated"
+        exit 10
+    else
+ #       echo "Invalid Model"
+        exit 0
+    fi      
+elif [ $Result == '20' ]
+#    echo "False"
+    exit 20
+else
+#    echo "Unknown"
+    exit 0
+fi
+
