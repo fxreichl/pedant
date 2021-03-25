@@ -1,0 +1,310 @@
+---
+title: "Pedant - SAT 2021 Submission"
+author: "Franz-Xaver Reichl, Friedrich Slivovsky, and Stefan Szeider"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data Frames from Log Files
+
+This report shows how tables and figures used in the submission were generated from solver log files.
+
+The following chunk (not included in the HTML) defines functions that generate data frames from the raw log files.
+
+```{r include=FALSE}
+require(stringr)
+require(readr)
+
+runsolver_strings = c("^Child status:",
+                      "^CPU time \\(s\\):",
+                      "^Max. virtual memory \\(cumulated for all children\\) \\(KiB\\):")
+
+getDatapoint <- function(filename, regular_expression, group_number) {
+ file_content_string <- read_file(filename) 
+ results <- str_match(file_content_string, regular_expression)
+ return(results[group_number])
+}
+
+getDirectoryName <- function(filename, part=0) {
+  directory <- dirname(filename)
+  directory_split <- strsplit(directory, '/')[[1]]
+  directory_split_nonempty <- Filter(function(s) { return(nchar(s) > 0)}, directory_split)
+  return(directory_split[part])
+}
+
+getDirectoryNamesDir <- function(directoryname, pattern="\\.o", part=1) {
+  return(sapply(list.files(directoryname, pattern=pattern, full.names=F, recursive=T),
+                function(filename) {getDirectoryName(filename, part)},
+                USE.NAMES = FALSE))
+}
+
+getDatapointsDirectory <- function(directoryname, data_point_string, group_number, pattern="\\.o") {
+  return(sapply(list.files(directoryname, pattern=pattern, full.names=T, recursive=T),
+                          function(filename) {getDatapoint(filename, data_point_string, group_number)},
+                          USE.NAMES = FALSE))
+}
+
+dataFrameFromDirectory <- function(directoryname) {
+  df <- (data.frame(Instance = getDatapointsDirectory(directoryname, "FILE (.+)\n", 2),
+                    Result = getDatapointsDirectory(directoryname, "Child status: ([0-9]+)\n", 2),
+                    Time = as.numeric(getDatapointsDirectory(directoryname, "CPU time \\(s\\): (.+)\n", 2)),
+                    Memory = as.numeric(getDatapointsDirectory(directoryname, "Max. virtual memory \\(cumulated for all children\\) \\(KiB\\): ([0-9]+)\n", 2)),
+                    Terminated = getDatapointsDirectory(directoryname, "Sending SIGTERM to process tree", 1),
+                    Solver = getDirectoryNamesDir(directoryname, part = 1),
+                    Benchmark = getDirectoryNamesDir(directoryname, part = 2),
+                    Family = getDirectoryNamesDir(directoryname, part = 3)))
+  df$Instance <-gsub(".augmented|.qcir|.qdimacs|.dqdimacs|.conv|.unique|.preprocessed|.drrs", "", df$Instance)
+  df$Instance <- basename(df$Instance)
+  return(df)
+}
+
+dataFrameFromDirectoryUnique <- function(directoryname, pattern="*o.*") {
+  df <- (data.frame(Instance = getDatapointsDirectory(directoryname, "FILE (.+)\n", 2),
+                    Result = getDatapointsDirectory(directoryname, "Child status: ([0-9]+)\n", 2),
+                    Time = as.numeric(getDatapointsDirectory(directoryname, "CPU time \\(s\\): (.+)\n", 2)),
+                    Memory = as.numeric(getDatapointsDirectory(directoryname, "Max. virtual memory \\(cumulated for all children\\) \\(KiB\\): ([0-9]+)\n", 2)),
+                    ExistentialFraction = as.numeric(getDatapointsDirectory(directoryname, "existential variables uniquely determined \\((.+)\\)", 2, pattern="\\.e")),
+                    Solver = getDirectoryNamesDir(directoryname, part = 1),
+                    Benchmark = getDirectoryNamesDir(directoryname, part = 2),
+                    Family = getDirectoryNamesDir(directoryname, part = 3)))
+  df$Instance <- gsub(".augmented|.qcir|.qdimacs|.dqdimacs|.conv|.preprocessed|.after", "", df$Instance)
+  df$Instance <- basename(df$Instance)
+  return(df)
+}
+
+readErrorFile <- function(filename, skip_lines=2) {
+  error_lines <- read_lines(file.path(filename), skip=skip_lines)
+  return(paste(error_lines, collapse=","))
+}
+
+readErrorFilesDir <- function(directoryname, pattern="\\.e") {
+  return(sapply(list.files(directoryname, pattern=pattern, full.names=T, recursive=T),
+                function(filename) {readErrorFile(filename)},
+                USE.NAMES = FALSE))
+}
+
+getErrorsDirectory <- function(directoryname) {
+  df <- (data.frame(Instance = getDatapointsDirectory(directoryname, "FILE (.+)\n", 2, pattern = "\\.e"),
+                    Solver = getDirectoryNamesDir(directoryname, "\\.e", part = 1),
+                    Benchmark = getDirectoryNamesDir(directoryname, "\\.e", part = 2),
+                    Family = getDirectoryNamesDir(directoryname, "\\.e", part = 3),
+                    Errors = as.character(readErrorFilesDir(directoryname, pattern="\\.e")),
+                    SegFault = as.character(getDatapointsDirectory(directoryname, "SIGSEGV", 1))
+                    ))
+  df$Instance <-gsub(".augmented|.qcir|.qdimacs|.dqdimacs|.conv|.unique|.preprocessed|.drrs", "", df$Instance)
+  df$Instance <- basename(df$Instance)
+  return(df)
+}
+
+getCompleteDataFrameDirectory <- function(directoryname) {
+  df_results <- dataFrameFromDirectory(directoryname)
+  df_errors <- getErrorsDirectory(directoryname)
+  return(merge(df_results, df_errors))
+}
+
+discrepancies <- function(df1, df2) {
+  merged <- merge(df1, df2, by = c("Instance", "Benchmark"))
+  merged$Result.x <- as.numeric(as.character(merged$Result.x))
+  merged$Result.y <- as.numeric(as.character(merged$Result.y))
+  solved_both <- subset(merged, Result.x %in% c(10, 20) & Result.y %in% c(10, 20))
+  discrepancies <- subset(solved_both, Result.x != Result.y, c(Instance, Solver.x, Result.x, Solver.y, Result.y))
+  return(discrepancies)
+}
+
+parScore <- function(df, timeout=1800, penalty_factor=2, 
+                     formula=Time ~ Solver + Benchmark + Family) {
+  df_copy <- df
+  unsolved_logical <- !df$Result %in% c(10, 20)
+  df_copy[unsolved_logical,]$Time <- timeout * penalty_factor
+  df_par <- aggregate(formula, data=df_copy, FUN = mean)
+  return(df_par)
+}
+```
+
+The next chunk actually reads the log files and generates a data frame "df" (this may take a few minutes).
+
+```{r}
+untar("logfiles.tar.bz2")
+df <- getCompleteDataFrameDirectory("logfiles")
+```
+
+## Checking for Errors and Discrepancies
+
+We first check that solvers were terminated correctly. For each run where a solver did not output one of the standard exit codes (10 for SAT, 20 for UNSAT, dCAQE also uses 30 for UNKNOWN), there are several options:
+
+1. RunSolver terminated the solver due to a time- or memory limit.
+2. The solver run was aborted due to a segmentation fault
+3. Some other error occurred and was printed to the log file.
+
+The function in the next chunk makes sure that runs without a standard exit code fall into one of the above categories. That is, RunSolver terminated the solver by sending a signal, there was a segmentation fault, or there was output to **Stderr**.
+
+We had a look at each non-empty error message. Most error were memory allocation failures due to a hard memory limit. The remaining errors were caused by the MILP solver for dependency elimination in HQS not finding a solution.
+
+```{r}
+require(testit)
+
+checkErrors <- function(df) {
+  failed_not_terminated <- subset(df, !Result %in% c(10, 20, 30) & is.na(Terminated) & is.na(SegFault))
+  # For unsolved runs that were neither terminated by Runsolver nor aborted with a segmentation fault, we require a non-empty error output.
+  return(all(str_length(failed_not_terminated$Errors) > 0))
+}
+
+assert(checkErrors(df))
+```
+
+We also checked for discrepancies between solver results, that is, for instances where solver A returns "SAT" but solver B returns "UNSAT". The following is a list of instances with discrepancies:
+
+```{r}
+discrepanciesSingle <- function(df) {
+  solved_instances <- subset(df, Result %in% c(10, 20))
+  solved_instances$Result <- as.numeric(as.character(solved_instances$Result))
+  solved_instances_aggregated <- aggregate(Result ~ Benchmark + Instance, solved_instances, FUN = "mean")
+  return(subset(solved_instances_aggregated, Result > 10 & Result < 20))
+}
+
+unique(discrepanciesSingle(df)$Instance)
+```
+
+We checked these more closely and found that dCAQE disagrees with some of the other solvers on these instances. We were unable to resolve these cases conclusively, but since we had seen some errors with dCAQE while testing with random instances, we concluded that a bug in dCAQE was the most likely explanation.
+
+Since the number of affected instances is insignificant compared to the size of the benchmark set, we chose to include data for these instances in our results.
+
+## Tables with Solved Instances and PAR2
+
+The function defined in the following chunk was used for generating the Table 1 and Table 2 in the paper.
+
+```{r,message=FALSE,warning=FALSE}
+require(reshape2)
+require(kableExtra)
+require(reshape2)
+require(dplyr)
+library(scales)
+
+options(knitr.kable.NA = '')
+
+getExponent <- function(x) {
+  floor(log10(x))
+}
+
+getSciString <- function(x) {
+  exponent <- getExponent(x)
+  mantisse <- x / 10^exponent
+  sprintf("$%.1f\\cdot 10^{%d}$", mantisse, exponent)
+}
+
+getResultTable <- function(df) {
+  df$Solver <- droplevels(df$Solver)
+  df_solved <- subset(df, Result %in% c(10, 20))
+  df_count <- count(df_solved, Solver, Benchmark, Family)
+  df_count_cast <- dcast(df_count, Family ~ Solver, value.var = c("n"))
+  df_count_true_false <- count(df_solved, Solver, Benchmark, Family, Result)
+  df_count_true_cast <- dcast(subset(df_count_true_false, Result == 10),
+                              Family ~ Solver, value.var = c("n"))
+  df_count_false_cast <- dcast(subset(df_count_true_false, Result == 20),
+                               Family ~ Solver, value.var = c("n"))
+  df_count_total <- count(df, Solver, Benchmark, Family)
+  df_count_total_cast <- dcast(df_count_total, Family ~ Solver, value.var = c("n"))
+  df_count_total_cast <- df_count_total_cast[,c(1,2)]
+  names(df_count_total_cast)[2] <- "Total"
+  
+  df_par <- parScore(df)
+  df_par$Time <- getSciString(df_par$Time)
+  df_par_cast <- dcast(df_par, Family ~ Solver, value.var = c("Time"))
+  
+  df_par_overall <- parScore(df, formula=Time ~ Solver + Benchmark)
+  df_par_overall$Time <- getSciString(df_par_overall$Time)
+  df_par_overall_cast <- dcast(df_par_overall, . ~ Solver + Benchmark, value.var = c("Time"))
+  
+  df_solved_overall <- count(df_solved, Solver, Benchmark)
+  df_solver_overall_cast <- dcast(df_solved_overall, ... ~ Solver + Benchmark, value.var = c("n"))
+  nr_instances_total <- length(unique(df$Instance))
+  nr_solvers <- length(levels(df$Solver))
+  cols_per_solver <- 2
+  
+  df_merged <- Reduce(function(...) merge(..., by="Family"), 
+                      list(df_count_cast, df_par_cast, df_count_total_cast))
+  df_merged$Family <- as.character(df_merged$Family)
+  
+  offsets <- 0:(cols_per_solver-1) * nr_solvers
+  solver_column_permutation <- unlist(lapply(1+1:nr_solvers, FUN = function(x) { x + offsets}))
+  column_permutation <- c(1, dim(df_merged)[2], solver_column_permutation)
+  df_merged <- df_merged[,column_permutation]
+  df_merged[is.na(df_merged)] <- 0
+  
+  # Add last line for totals.
+  df_merged <- rbind(df_merged, rep(NA, dim(df_merged)[2]))
+  solved_overall_columns <- 3 + (0:(nr_solvers-1)) * cols_per_solver
+  df_merged[dim(df_merged)[1],solved_overall_columns] <- df_solver_overall_cast[, 2:(nr_solvers+1)]
+  par_overall_columns <- 2 + cols_per_solver + (0:(nr_solvers-1)) * cols_per_solver
+  df_merged[dim(df_merged)[1],par_overall_columns] <- df_par_overall_cast[, 2:(nr_solvers+1)]
+  df_merged[dim(df_merged)[1], 2] <- nr_instances_total
+  df_merged[dim(df_merged)[1], 1] <- "All"
+  
+  col_names <- c("Family", "Total", 
+                 rep(c("Solved", "PAR2"), nr_solvers))
+  header_above <- c(" " = 2, 
+                     sapply(levels(df$Solver), 
+                            FUN = function(label) { label = cols_per_solver }))
+
+  kable(df_merged, format="html", col.names = col_names, escape = F) %>% add_header_above(header_above) %>% row_spec(dim(df_merged)[1]-1, hline_after = T)  %>% kable_styling(latex_options="scale_down")
+}
+```
+
+### Table 1
+
+```{r}
+df_compound <- subset(df, Benchmark == "dqbf-large")
+getResultTable(df_compound)
+```
+
+### Table 2
+
+For Table 2, we also have to set the benchmark family names.
+
+```{r}
+df_eval20 <- subset(df, Benchmark == "dqbf20")
+
+familyNameDQBF20 <- function(instance_name) {
+  if (startsWith(instance_name, "kullmann")) {
+    return("Kullmann")
+  } else if (startsWith(instance_name, "bloem")) {
+    return("Bloem")
+  } else if (startsWith(instance_name, "scholl")) {
+    return("Scholl")
+  } else if (startsWith(instance_name, "tentrup")) {
+    return("Tentrup")
+  } else {
+    return("Balabanov")
+  }
+}
+
+df_eval20$Family <- sapply(df_eval20$Instance, FUN = familyNameDQBF20)
+
+getResultTable(df_eval20)
+```
+
+## Figure with Fraction of Unique Skolem Functions
+
+The data for definability of existential variables by their dependency sets was computed by Unique. The next chunk loads the data from its log files.
+
+```{r}
+untar("logfiles-unique.tar.bz2")
+df_unique <- dataFrameFromDirectoryUnique("logfiles-unique")
+df_unique$Family <- as.character(df_unique$Family)
+df_unique$Family[df_unique$Benchmark == "dqbf20"] <- sapply(df_unique$Instance[df_unique$Benchmark == "dqbf20"], FUN = familyNameDQBF20)
+df_unique$Family <- as.factor(df_unique$Family)
+```
+
+The histogram in Figure 1 is generated using the following code.
+
+```{r, message=FALSE,fig.width=8,fig.height=4}
+require(ggplot2)
+
+levels(df_unique$Benchmark) <- c("Compound", "QBFEval'20")
+
+unique_plot <- ggplot(df_unique, aes(x = ExistentialFraction, fill=Family)) + geom_histogram(aes(y = stat(density) / 10), binwidth = 0.1, na.rm = TRUE, position=position_dodge()) + facet_wrap(~Benchmark, ncol=2) + xlab("defined existential variables") + ylab("instances per family") + scale_y_continuous(labels = scales::percent) + scale_x_continuous(labels = scales::percent) + theme(axis.title.x = element_blank(), axis.title.y = element_blank()) + theme(text = element_text(size=10))
+unique_plot
+```
