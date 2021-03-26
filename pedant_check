@@ -13,17 +13,14 @@ then
     isModelOk=$?
     if [ $isModelOk == '0' ]
     then
-#        echo "Model validated"
         exit 10
     else
- #       echo "Invalid Model"
         exit 0
     fi      
 elif [ $Result == '20' ]
-#    echo "False"
+then
     exit 20
 else
-#    echo "Unknown"
     exit 0
 fi
 
